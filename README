@@ -1,0 +1,7 @@
+simple script to examine packets in pcap files.
+
+some examples are at the bottom of the code.
+
+specifying an outfile with -o will write the matching packets there.
+
+when using "images", they are saved in a directory named images
