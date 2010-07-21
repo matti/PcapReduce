@@ -101,7 +101,7 @@ ImageFiles = {
 
 def images(p)
   http(p) { |pkt| 
-    content_type = /^Content-Type: (image\/.*)\n/i.match(pkt.to_s)
+    content_type = /^Content-Type: (image\/[^; \n]*).*\n/i.match(pkt.to_s)
     if content_type then
       c = pkt.to_s
       image_data = /\n\r?\n(.*)/m.match(c)
@@ -111,7 +111,7 @@ def images(p)
         rescue Net::DNS::Resolver::NoResponseError
           puts "unable to resolve: #{p.ip_saddr}"
         end
-        source_name = source.nil? ? p.ip_saddr : source.ptr.chomp('.')
+        source_name = source.respond_to?(:ptr) ? source.ptr.chomp('.') : p.ip_saddr
 
         file_type = ImageFiles[content_type[1].strip]
         unless file_type.nil? then
@@ -145,7 +145,7 @@ def iterate_packets(file)
   end
 end
 
-@resolver = Net::DNS::Resolver.new({:udp_timeout=>0.1})
+@resolver = Net::DNS::Resolver.new({:udp_timeout=>1})
 @outfile = ARGV.flags.o
 
 puts "Pcaprub version: #{Pcap.version}"
@@ -163,6 +163,8 @@ if File.readable?(infile = (ARGV[0] || "in.cap"))
     http(p) { |pkt| http_string(/(#{HttpMethods.join("|")}).*/,pkt) }
     http(p) { |pkt| http_string(/^User-Agent:.*/i,pkt) }
     http(p) { |pkt| http_string(/password.*/i,pkt) }
+    http(p) { |pkt| http_string(/facebook/i,pkt) }
+    http(p) { |pkt| http_string(/login.*/i,pkt) }
     http(p) { |pkt| http_string(/^Host:.*facebook.*/,pkt) }
     http(p) { |pkt| http_string(/^Host:.*fbcdn.*/,pkt) }
     http(p) { |pkt| http_string(/^(Set-)?Cookie:.*utm.*/,pkt) }
