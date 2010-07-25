@@ -4,6 +4,7 @@ require 'net/dns/packet'
 require 'net/dns/resolver'
 require 'uri'
 require 'optiflag'
+require 'zlib'
 
 module PcapReduce extend OptiFlagSet
   optional_flag "o"
@@ -12,12 +13,29 @@ end
 
 HttpMethods = ["OPTIONS", "GET", "HEAD", "POST", "PUT", "DELETE", "TRACE", "CONNECT"]
 
-
-def http_string(re, pkt)
-  lines = pkt.to_s.split("\n")
+def extract_matches(re, all)
+  lines = all.split("\n")
   lines.map do |l|
     re.match(l).to_s
   end
+end
+
+def body_string(re, pkt)
+  body = /\n\r?\n(.*)/m.match(pkt.to_s)
+  if body then
+    extract_matches(re, body[1])
+  end
+end
+
+def header_string(re, pkt)
+  headers = /(.*)\n\r?\n/m.match(pkt.to_s)
+  if headers then
+    extract_matches(re, headers[1])
+  end
+end
+
+def http_string(re, pkt)
+  extract_matches(re, pkt.to_s)
 end
 
 @packets = {}
@@ -25,12 +43,14 @@ end
 @cache = []
 
 def store_result(ra, pkt)
-  ra.each do |r|
-    unless r.empty? then
-      @selected << pkt unless @outfile.nil?
-      unless @cache.include?(r) then
-        @cache << r
-        puts URI.unescape(r)
+  unless ra.nil? then
+    ra.each do |r|
+      unless r.empty? then
+        @selected << pkt unless @outfile.nil?
+        unless @cache.include?(r) then
+          @cache << r
+          puts URI.unescape(r)
+        end
       end
     end
   end
@@ -70,7 +90,7 @@ end
 def data(pkt)
   xyz = @packets[pkt.tcp_ack] || { :body => pkt.tcp_header.body }
 
-  if (pkt.tcp_seq == xyz[:next_seq] || xyz[:next_seq].nil?) then
+  if (pkt.tcp_seq == xyz[:next_seq]) then
     xyz[:body] += pkt.tcp_header.body 
   end
 
@@ -78,13 +98,16 @@ def data(pkt)
 
   @packets[pkt.tcp_ack] = xyz
 
-  x = yield(xyz[:body])
+  x = yield(inflate(xyz[:body]))
   store_result(x, pkt)
 end
 
 def http(pkt, &fn) 
   if pkt.is_tcp? then
-    if (pkt.tcp_dport == 80) || (pkt.tcp_sport == 80) then
+    pkt_ports = [pkt.tcp_dport, pkt.tcp_sport]
+    expected_ports = [80, 8080]
+    existing_ports = pkt_ports.select { |port| expected_ports.include? port }
+    unless existing_ports.empty? then
       data(pkt, &fn)
     end
   end
@@ -105,7 +128,7 @@ def images(p)
     if content_type then
       c = pkt.to_s
       image_data = /\n\r?\n(.*)/m.match(c)
-      unless image_data.nil? then
+      if image_data then
         begin
           source = @resolver.send(p.ip_saddr.to_s).answer[0]
         rescue Net::DNS::Resolver::NoResponseError
@@ -123,10 +146,26 @@ def images(p)
         end
       end
     end
-    []
   }
 end
 
+def inflate(pkt)
+  gzip_encoded = /^Content-Encoding: gzip\r?\n/i.match(pkt.to_s)
+  parts = /(.*\n\r?\n)(.*)/m.match(pkt.to_s)
+  if gzip_encoded then
+    if parts then
+      begin
+        gzipped = parts[2]
+        inflated = Zlib::GzipReader.new(StringIO.new(gzipped)).read
+        inflated.force_encoding "binary" if inflated.respond_to? :force_encoding
+        parts[1] + inflated
+      rescue Zlib::DataError, Zlib::GzipFile::Error
+      end
+    end
+  else
+    pkt.to_s
+  end
+end
 
 def iterate_packets(file)
   file = File.open(file) {|f| f.read}
@@ -148,6 +187,7 @@ end
 @resolver = Net::DNS::Resolver.new({:udp_timeout=>1})
 @outfile = ARGV.flags.o
 
+
 puts "Pcaprub version: #{Pcap.version}"
 
 if File.readable?(infile = (ARGV[0] || "in.cap"))
@@ -158,19 +198,22 @@ if File.readable?(infile = (ARGV[0] || "in.cap"))
     images(p)
     udp(p, 53)
     dns(p)
-    http(p) { |pkt| http_string(/.*HTTP.*/,pkt) }
-    http(p) { |pkt| http_string(/^Host:.*/,pkt) }
-    http(p) { |pkt| http_string(/(#{HttpMethods.join("|")}).*/,pkt) }
-    http(p) { |pkt| http_string(/^User-Agent:.*/i,pkt) }
+    http(p) { |pkt| http_string(/.*HTTP.*/, pkt) }
+    http(p) { |pkt| header_string(/^Host:.*/, pkt) }
+    http(p) { |pkt| body_string(/"msg":/i, pkt) }
+    http(p) { |pkt| body_string(/<title>.*/mi, pkt) }
+    http(p) { |pkt| header_string(/(#{HttpMethods.join("|")}).*/,pkt) }
+    http(p) { |pkt| header_string(/^User-Agent:.*/i,pkt) }
     http(p) { |pkt| http_string(/password.*/i,pkt) }
     http(p) { |pkt| http_string(/facebook/i,pkt) }
-    http(p) { |pkt| http_string(/login.*/i,pkt) }
-    http(p) { |pkt| http_string(/^Host:.*facebook.*/,pkt) }
-    http(p) { |pkt| http_string(/^Host:.*fbcdn.*/,pkt) }
-    http(p) { |pkt| http_string(/^(Set-)?Cookie:.*utm.*/,pkt) }
-    http(p) { |pkt| http_string(/^(Set-)?Cookie:.*JSESSIO.*/,pkt) }
-    http(p) { |pkt| http_string(/^Accept.*/,pkt) }
-    http(p) { |pkt| http_string(/^(Set-)?Cookie:.*/,pkt) }
+    http(p) { |pkt| body_string(/login.*/i,pkt) }
+    http(p) { |pkt| header_string(/^Host:.*facebook.*/,pkt) }
+    http(p) { |pkt| header_string(/^Host:.*fbcdn.*/,pkt) }
+    http(p) { |pkt| header_string(/^(Set-)?Cookie:.*utm.*/,pkt) }
+    http(p) { |pkt| header_string(/^(Set-)?Cookie:.*JSESSIO.*/,pkt) }
+    http(p) { |pkt| header_string(/^Accept.*/,pkt) }
+    http(p) { |pkt| header_string(/^Content-Type.*/,pkt) }
+    http(p) { |pkt| header_string(/^(Set-)?Cookie:.*/,pkt) }
     http(p) { |pkt| http_string(/http(s)?(:\/\/)?[%a-zA-Z0-9\.\-]*/,pkt) }
   }
   unless @outfile.nil? then
