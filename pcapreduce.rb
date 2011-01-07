@@ -15,23 +15,19 @@ HttpMethods = ["OPTIONS", "GET", "HEAD", "POST", "PUT", "DELETE", "TRACE", "CONN
 
 def extract_matches(re, all)
   lines = all.split("\n")
-  lines.map do |l|
-    re.match(l).to_s
-  end
+  lines.map { |l| re.match(l).to_s }
 end
 
 def body_string(re, pkt)
   body = /\n\r?\n(.*)/m.match(pkt.to_s)
-  if body then
-    extract_matches(re, body[1])
-  end
+  
+  extract_matches(re, body[1]) if body
 end
 
 def header_string(re, pkt)
   headers = /(.*)\n\r?\n/m.match(pkt.to_s)
-  if headers then
-    extract_matches(re, headers[1])
-  end
+
+  extract_matches(re, headers[1]) if headers
 end
 
 def http_string(re, pkt)
@@ -43,47 +39,48 @@ end
 @cache = []
 
 def store_result(ra, pkt)
-  unless ra.nil? then
-    ra.each do |r|
-      unless r.empty? then
-        @selected << pkt unless @outfile.nil?
-        unless @cache.include?(r) then
-          @cache << r
-          puts URI.unescape(r)
-        end
-      end
+  return unless ra
+  
+  ra.each do |r|
+    next if r.empty?
+    
+    @selected << pkt if @outfile
+    
+    unless @cache.include?(r) then
+      @cache << r
+      puts URI.unescape(r)
     end
   end
 end
 
 def tcp(pkt, port=0)
-  if (pkt.is_tcp?) then
-    if (port==0 || pkt.tcp_src == port || pkt.tcp_dst == port) then
-      s = "ts: #{pkt.ip_saddr}:#{pkt.tcp_src}" 
-      d = "td: #{pkt.ip_daddr}:#{pkt.tcp_dst}" 
-      store_result([s,d], pkt)
-    end
+  return unless pkt.is_tcp?
+  
+  if (port==0 || pkt.tcp_src == port || pkt.tcp_dst == port) then
+    s = "ts: #{pkt.ip_saddr}:#{pkt.tcp_src}" 
+    d = "td: #{pkt.ip_daddr}:#{pkt.tcp_dst}" 
+    store_result([s,d], pkt)
   end
 end
 
 def udp(pkt, port=0)
-  if (pkt.is_udp?) then
-    if (port==0 || pkt.udp_src == port || pkt.udp_dst == port) then
-      s = "us: #{pkt.ip_saddr}:#{pkt.udp_src}" 
-      d = "ud: #{pkt.ip_daddr}:#{pkt.udp_dst}" 
-      store_result([s,d], pkt)
-    end
+  return unless pkt.is_udp?
+  
+  if (port==0 || pkt.udp_src == port || pkt.udp_dst == port) then
+    s = "us: #{pkt.ip_saddr}:#{pkt.udp_src}" 
+    d = "ud: #{pkt.ip_daddr}:#{pkt.udp_dst}" 
+    store_result([s,d], pkt)
   end
 end
 
 def dns(pkt)
-  if pkt.is_udp? then
-    if (pkt.udp_dport == 53) || (pkt.udp_sport == 53) then
-      dns_packet = Net::DNS::Packet::parse(pkt.udp_header.body)
-      names = dns_packet.answer.map {|a| a.name}
-      names += dns_packet.question.map {|q| q.qName}
-      store_result(names, pkt)
-    end
+  return unless pkt.is_udp?
+  
+  if (pkt.udp_dport == 53) || (pkt.udp_sport == 53) then
+    dns_packet = Net::DNS::Packet::parse(pkt.udp_header.body)
+    names = dns_packet.answer.map {|a| a.name}
+    names += dns_packet.question.map {|q| q.qName}
+    store_result(names, pkt)
   end
 end
 
@@ -103,14 +100,12 @@ def data(pkt)
 end
 
 def http(pkt, &fn) 
-  if pkt.is_tcp? then
-    pkt_ports = [pkt.tcp_dport, pkt.tcp_sport]
-    expected_ports = [80, 8080]
-    existing_ports = pkt_ports.select { |port| expected_ports.include? port }
-    unless existing_ports.empty? then
-      data(pkt, &fn)
-    end
-  end
+  return unless pkt.is_tcp?
+  
+  pkt_ports = [pkt.tcp_dport, pkt.tcp_sport]
+  expected_ports = [80, 8080]
+  existing_ports = pkt_ports.select { |port| expected_ports.include? port }
+  data(pkt, &fn) unless existing_ports.empty?
 end
 
 ImageFiles = { 
@@ -125,26 +120,27 @@ ImageFiles = {
 def images(p)
   http(p) { |pkt| 
     content_type = /^Content-Type: (image\/[^; \n]*).*\n/i.match(pkt.to_s)
-    if content_type then
-      c = pkt.to_s
-      image_data = /\n\r?\n(.*)/m.match(c)
-      if image_data then
-        begin
-          source = @resolver.send(p.ip_saddr.to_s).answer[0]
-        rescue Net::DNS::Resolver::NoResponseError
-          puts "unable to resolve: #{p.ip_saddr}"
-        end
-        source_name = source.respond_to?(:ptr) ? source.ptr.chomp('.') : p.ip_saddr
+    next unless content_type
+    
+    c = pkt.to_s
+    image_data = /\n\r?\n(.*)/m.match(c)
+    
+    next unless image_data
+    
+    begin
+      source = @resolver.send(p.ip_saddr.to_s).answer[0]
+    rescue Net::DNS::Resolver::NoResponseError
+      puts "unable to resolve: #{p.ip_saddr}"
+    end
+    source_name = source.respond_to?(:ptr) ? source.ptr.chomp('.') : p.ip_saddr
 
-        file_type = ImageFiles[content_type[1].strip]
-        unless file_type.nil? then
-          f = File.new("images/#{source_name}-%s.#{file_type}" % p.tcp_ack, "w") 
-          f.write(image_data[1])
-          f.close
-        else 
-          puts "ignoring image found.. #{content_type.to_s}"
-        end
-      end
+    file_type = ImageFiles[content_type[1].strip]
+    if file_type
+      f = File.new("images/#{source_name}-%s.#{file_type}" % p.tcp_ack, "w") 
+      f.write(image_data[1])
+      f.close
+    else 
+      puts "ignoring image found.. #{content_type.to_s}"
     end
   }
 end
@@ -152,16 +148,18 @@ end
 def inflate(pkt)
   gzip_encoded = /^Content-Encoding: gzip\r?\n/i.match(pkt.to_s)
   parts = /(.*\n\r?\n)(.*)/m.match(pkt.to_s)
+
   if gzip_encoded then
-    if parts then
-      begin
-        gzipped = parts[2]
-        inflated = Zlib::GzipReader.new(StringIO.new(gzipped)).read
-        inflated.force_encoding "binary" if inflated.respond_to? :force_encoding
-        parts[1] + inflated
-      rescue Zlib::DataError, Zlib::GzipFile::Error
-      end
-    end
+
+    return unless parts
+    
+    begin
+      gzipped = parts[2]
+      inflated = Zlib::GzipReader.new(StringIO.new(gzipped)).read
+      inflated.force_encoding "binary" if inflated.respond_to? :force_encoding
+      parts[1] + inflated
+    rescue Zlib::DataError, Zlib::GzipFile::Error; end
+
   else
     pkt.to_s
   end
@@ -177,9 +175,8 @@ def iterate_packets(file)
     p = PacketFu::PcapPacket::new(:endian => :little)
     p.read(body)
     pkt = PacketFu::Packet::parse(p.data) 
-    unless pkt.is_invalid? then
-      yield(pkt)
-    end
+    yield(pkt) unless pkt.is_invalid?
+    
     body = body[p.sz,body.size]
   end
 end
@@ -216,7 +213,8 @@ if File.readable?(infile = (ARGV[0] || "in.cap"))
     http(p) { |pkt| header_string(/^(Set-)?Cookie:.*/,pkt) }
     http(p) { |pkt| http_string(/http(s)?(:\/\/)?[%a-zA-Z0-9\.\-]*/,pkt) }
   }
-  unless @outfile.nil? then
+  
+  if @outfile then
     puts "filtered, writing outfile..."
     outfile = PacketFu::PcapFile::new
     outfile.array_to_file(:array => @selected)
